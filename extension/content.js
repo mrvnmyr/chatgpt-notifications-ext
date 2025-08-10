@@ -1,19 +1,28 @@
 (() => {
   "use strict";
 
-  // The exact XPath provided in the prompt:
-  const XPATH = "//div[@data-testid='composer-trailing-actions']//button[@id='composer-submit-button' or @data-testid='composer-speech-button']";
+  // Target from your spec:
+  const XPATH =
+    "//div[@data-testid='composer-trailing-actions']//button[@id='composer-submit-button' or @data-testid='composer-speech-button']";
 
-  // Track which nodes we’re already observing to avoid duplicates.
-  const observedButtons = new WeakSet();
+  // Attributes that indicate meaningful changes
+  const OBS_ATTRS = ["aria-label", "class", "disabled", "title"];
+
+  // Track observed buttons: Element -> { observer, timer }
+  const observed = new Map();
 
   function xAll(xpath, root = document) {
-    const snapshot = document.evaluate(xpath, root, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
-    const results = [];
-    for (let i = 0; i < snapshot.snapshotLength; i++) {
-      results.push(snapshot.snapshotItem(i));
-    }
-    return results;
+    const snap = document.evaluate(
+      xpath,
+      root,
+      null,
+      XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+      null
+    );
+    const out = [];
+    for (let i = 0; i < snap.snapshotLength; i++)
+      out.push(snap.snapshotItem(i));
+    return out;
   }
 
   async function ensureNotifPermission() {
@@ -29,77 +38,96 @@
   }
 
   async function notifyWithLabel(label) {
-    if (!label) return;
     const ok = await ensureNotifPermission();
+    const body = (label && String(label).trim()) || "Composer button changed";
     if (ok) {
       try {
-        new Notification("ChatGPT Button Changed", { body: label });
+        new Notification("ChatGPT Button Changed", { body });
       } catch (e) {
-        // Fallback to console if notifications fail.
-        console.log("[ChatGPT Button Change Notifier]", label);
+        // Some environments disallow direct constructor; fall back to console.
+        console.log("[ChatGPT Notifier]", body);
       }
     } else {
-      // No permission: stay quiet but log to console for debugging.
-      console.log("[ChatGPT Button Change Notifier] (no notification permission) aria-label:", label);
+      // No permission—don’t spam alerts; just log.
+      console.log("[ChatGPT Notifier] (no notification permission):", body);
     }
   }
 
+  function scheduleNotify(el, label) {
+    const rec = observed.get(el);
+    if (!rec) return;
+    clearTimeout(rec.timer);
+    rec.timer = setTimeout(() => notifyWithLabel(label), 150);
+  }
+
   function observeButton(btn) {
-    if (!btn || observedButtons.has(btn)) return;
-    observedButtons.add(btn);
+    if (!btn || observed.has(btn)) return;
 
-    let lastLabel = btn.getAttribute("aria-label") || "";
+    const rec = { observer: null, timer: null };
+    observed.set(btn, rec);
 
-    const mo = new MutationObserver((mutations) => {
-      // Consider "changes" to be attribute or subtree changes on the button.
-      let relevantChange = false;
+    rec.observer = new MutationObserver((mutations) => {
+      let relevant = false;
       for (const m of mutations) {
         if (m.type === "attributes") {
-          // Prioritize aria-label changes, but allow other attribute changes to qualify as "change"
-          if (m.attributeName === "aria-label" || m.attributeName === "class" || m.attributeName === "disabled") {
-            relevantChange = true;
+          if (OBS_ATTRS.includes(m.attributeName)) {
+            relevant = true;
             break;
           }
-        } else if (m.type === "childList" || m.type === "subtree") {
-          relevantChange = true;
+        } else if (m.type === "childList") {
+          relevant = true;
           break;
         }
       }
+      if (!relevant) return;
 
-      if (!relevantChange) return;
-
-      const currentLabel = btn.getAttribute("aria-label") || "";
-      if (currentLabel && currentLabel !== lastLabel) {
-        lastLabel = currentLabel;
-        notifyWithLabel(currentLabel);
-      }
+      const label = btn.getAttribute("aria-label") || "";
+      scheduleNotify(btn, label);
     });
 
-    mo.observe(btn, {
+    rec.observer.observe(btn, {
       attributes: true,
-      attributeFilter: ["aria-label", "class", "disabled"],
+      attributeFilter: OBS_ATTRS,
       childList: true,
-      subtree: true
+      subtree: true,
     });
+  }
+
+  function cleanupDisconnected() {
+    for (const [el, rec] of Array.from(observed.entries())) {
+      if (!el.isConnected) {
+        try {
+          rec.observer && rec.observer.disconnect();
+        } catch {}
+        clearTimeout(rec.timer);
+        observed.delete(el);
+      }
+    }
   }
 
   function scanAndAttach() {
-    const buttons = xAll(XPATH);
-    buttons.forEach(observeButton);
+    cleanupDisconnected();
+    const matches = xAll(XPATH);
+    for (const btn of matches) {
+      observeButton(btn);
+    }
   }
 
   function start() {
-    // Initial scan
+    // Initial pass
     scanAndAttach();
 
-    // Keep scanning as the page dynamically updates
-    const domObserver = new MutationObserver(() => {
+    // Watch the whole document for dynamic UI changes (button recreate, etc.)
+    const docObserver = new MutationObserver(() => {
       scanAndAttach();
     });
-    domObserver.observe(document.documentElement || document.body, {
+    docObserver.observe(document.documentElement || document, {
       childList: true,
-      subtree: true
+      subtree: true,
     });
+
+    // Fallback periodic scan in case something slips past (cheap, but reliable)
+    setInterval(scanAndAttach, 3000);
   }
 
   if (document.readyState === "loading") {
