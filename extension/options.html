@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ChatGPT Button Change Notifier — Options</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body { font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; }
+      .row { display: flex; align-items: center; gap: 8px; }
+      label { font-weight: 600; }
+      .note { color: gray; margin-top: 8px; }
+    </style>
+  </head>
+  <body>
+    <h1>Options</h1>
+    <div class="row">
+      <input type="checkbox" id="debug" />
+      <label for="debug">Enable debug console logs</label>
+    </div>
+    <p class="note">
+      When enabled, the content script will print logs prefixed with
+      <code>[CGPT Notifier]</code> to the DevTools Console.
+    </p>
+    <script src="options.js"></script>
+  </body>
+</html>

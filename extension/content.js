@@ -1,6 +1,35 @@
 (() => {
   "use strict";
 
+  // --- Debug gate (default OFF, controlled via options) -----------------
+  let DEBUG = false;
+  function initDebug() {
+    try {
+      const sync = chrome?.storage?.sync;
+      if (!sync) return;
+      sync.get({ cgpt_debug: false }, (res) => {
+        DEBUG = !!res.cgpt_debug;
+        if (DEBUG) console.log("[CGPT Notifier] debug enabled (on load)");
+      });
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area !== "sync" && area !== "local") return;
+        if (Object.prototype.hasOwnProperty.call(changes, "cgpt_debug")) {
+          const next = !!changes.cgpt_debug.newValue;
+          const prev = !!changes.cgpt_debug.oldValue;
+          DEBUG = next;
+          if (next && !prev) {
+            console.log("[CGPT Notifier] debug toggled ON");
+          }
+          // Intentionally silent when toggled OFF (per requirement).
+        }
+      });
+    } catch {}
+  }
+  const DBG = (...args) => DEBUG && console.log("[CGPT Notifier]", ...args);
+  const DBG_ERR = (...args) => DEBUG && console.warn("[CGPT Notifier:warn]", ...args);
+
+  initDebug();
+
   // Target from your spec:
   const XPATH =
     "//div[@data-testid='composer-trailing-actions']//button[@id='composer-submit-button' or @data-testid='composer-speech-button']";
@@ -24,10 +53,6 @@
 
   // Per-kind state: kind -> { present, lastMissingAt, lastNotifiedLabel, lastNotifiedAt }
   const kindState = new Map();
-
-  // --- Debug helpers ----------------------------------------------------
-  const DBG = (...args) => console.log("[CGPT Notifier]", ...args);
-  const DBG_ERR = (...args) => console.warn("[CGPT Notifier:warn]", ...args);
 
   function getKindState(kind) {
     let s = kindState.get(kind);
@@ -74,7 +99,6 @@
 
   // --- Title encoding helpers (UTF-8 safe base64) -----------------------
   function b64utf8(str) {
-    // encodeURIComponent to UTF-8 bytes, then pack to a Latin1 string for btoa
     return btoa(
       encodeURIComponent(str).replace(/%([0-9A-F]{2})/g, (_, p1) =>
         String.fromCharCode(parseInt(p1, 16))
@@ -117,7 +141,7 @@
         DBG("Notification shown with title only:", title);
       } catch (e) {
         DBG_ERR("Notification() failed, logging instead:", e);
-        console.log("[ChatGPT Notifier] (title)", title);
+        DEBUG && console.log("[CGPT Notifier] (title)", title);
       }
     } else {
       DBG("No notification permission. Would have shown title:", title);
@@ -157,7 +181,6 @@
     const label = btn.getAttribute("aria-label") || "";
     if (reappeared) {
       DBG("Initial notify due to reappearance. kind:", kind, "label:", label);
-      // bypass dedupe on reappearance but still mark
       markNotified(kind, label);
       const rec = observed.get(btn);
       if (rec) {
@@ -205,7 +228,6 @@
       presentCount: state.present,
     });
 
-    // Observe attribute/child changes on the button
     rec.observer = new MutationObserver((mutations) => {
       let relevant = false;
       for (const m of mutations) {
@@ -241,7 +263,6 @@
       subtree: true,
     });
 
-    // Visibility-based trigger (covers cases where node stays but becomes visible again)
     if ("IntersectionObserver" in window) {
       rec.io = new IntersectionObserver(
         (entries) => {
@@ -263,11 +284,9 @@
         DBG_ERR("IntersectionObserver.observe failed:", e);
       }
     } else {
-      // Fallback: check visibility opportunistically on rescans
       rec.wasVisible = isElementVisible(btn);
     }
 
-    // Fire an initial notification (handles attach/recreation)
     maybeInitialNotify(btn, kind, { reappeared });
   }
 
@@ -315,8 +334,6 @@
     DBG(`Scan (${why}) found ${matches.length} match(es).`);
     for (const btn of matches) observeButton(btn);
 
-    // Fallback visibility edge: if a tracked button is visible again without IO,
-    // trigger a notify (rare path — older browsers / IO disabled).
     for (const [el, rec] of observed.entries()) {
       const nowVis = isElementVisible(el);
       if (nowVis && rec.wasVisible === false) {
@@ -330,11 +347,8 @@
 
   function start() {
     DBG("Content script loaded. Starting observers…");
-
-    // Initial pass
     scanAndAttach("initial");
 
-    // Watch the whole document for dynamic UI changes (button recreate, etc.)
     const docObserver = new MutationObserver((mutationList) => {
       for (const m of mutationList) {
         if (m.type === "childList") {
@@ -349,7 +363,6 @@
       subtree: true,
     });
 
-    // Fallback periodic scan in case something slips past (cheap, but reliable)
     setInterval(() => scanAndAttach("interval"), 3000);
   }
 
