@@ -72,6 +72,27 @@
     return rect.width > 0 && rect.height > 0;
   }
 
+  // --- Title encoding helpers (UTF-8 safe base64) -----------------------
+  function b64utf8(str) {
+    // encodeURIComponent to UTF-8 bytes, then pack to a Latin1 string for btoa
+    return btoa(
+      encodeURIComponent(str).replace(/%([0-9A-F]{2})/g, (_, p1) =>
+        String.fromCharCode(parseInt(p1, 16))
+      )
+    );
+  }
+  function getWindowTitleB64() {
+    try {
+      const base = document.title || location.href || "";
+      const b64 = b64utf8(base);
+      DBG("Encoded window title:", { base, b64 });
+      return b64;
+    } catch (e) {
+      DBG_ERR("Title base64 encode failed:", e);
+      return "";
+    }
+  }
+
   async function ensureNotifPermission() {
     if (!("Notification" in window)) return false;
     if (Notification.permission === "granted") return true;
@@ -86,18 +107,20 @@
   }
 
   async function notifyWithLabel(label) {
-    const body = (label && String(label).trim()) || "Composer button changed";
+    const bodyLabel = (label && String(label).trim()) || "Composer button changed";
+    const title = `ChatGPT::${getWindowTitleB64()}::${bodyLabel}`;
     const ok = await ensureNotifPermission();
     if (ok) {
       try {
-        new Notification("ChatGPT Button Changed", { body });
-        DBG("Notification shown:", body);
+        // Per request: empty body, all info in title
+        new Notification(title, { body: "" });
+        DBG("Notification shown with title only:", title);
       } catch (e) {
         DBG_ERR("Notification() failed, logging instead:", e);
-        console.log("[ChatGPT Notifier]", body);
+        console.log("[ChatGPT Notifier] (title)", title);
       }
     } else {
-      DBG("No notification permission. Would have shown:", body);
+      DBG("No notification permission. Would have shown title:", title);
     }
   }
 
