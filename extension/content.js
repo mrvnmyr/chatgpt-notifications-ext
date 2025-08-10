@@ -5,18 +5,43 @@
   const XPATH =
     "//div[@data-testid='composer-trailing-actions']//button[@id='composer-submit-button' or @data-testid='composer-speech-button']";
 
-  // Attributes that indicate meaningful changes
-  const OBS_ATTRS = ["aria-label", "class", "disabled", "title"];
+  // Attributes that indicate meaningful changes (expanded for visibility toggles)
+  const OBS_ATTRS = [
+    "aria-label",
+    "class",
+    "disabled",
+    "title",
+    "style",
+    "aria-hidden",
+    "hidden",
+  ];
 
-  // Track observed buttons: Element -> { observer, timer, kind }
+  // Re-notify timeout for identical labels (ms)
+  const RESURGE_MS = 1500;
+
+  // Track observed buttons: Element -> { observer, io, timer, kind, wasVisible }
   const observed = new Map();
-  // Track last label we actually notified for, per button "kind"
-  // kind = "submit" | "speech" | "unknown"
-  const lastNotifiedByKind = new Map();
+
+  // Per-kind state: kind -> { present, lastMissingAt, lastNotifiedLabel, lastNotifiedAt }
+  const kindState = new Map();
 
   // --- Debug helpers ----------------------------------------------------
   const DBG = (...args) => console.log("[CGPT Notifier]", ...args);
   const DBG_ERR = (...args) => console.warn("[CGPT Notifier:warn]", ...args);
+
+  function getKindState(kind) {
+    let s = kindState.get(kind);
+    if (!s) {
+      s = {
+        present: 0,
+        lastMissingAt: 0,
+        lastNotifiedLabel: null,
+        lastNotifiedAt: 0,
+      };
+      kindState.set(kind, s);
+    }
+    return s;
+  }
 
   function xAll(xpath, root = document) {
     const snap = document.evaluate(
@@ -36,6 +61,15 @@
     const dt = btn?.getAttribute("data-testid") || "";
     if (dt === "composer-speech-button") return "speech";
     return "unknown";
+  }
+
+  function isElementVisible(el) {
+    if (!(el instanceof Element)) return false;
+    const rect = el.getBoundingClientRect?.();
+    const style = window.getComputedStyle?.(el);
+    if (!rect || !style) return true; // best effort
+    if (style.display === "none" || style.visibility === "hidden") return false;
+    return rect.width > 0 && rect.height > 0;
   }
 
   async function ensureNotifPermission() {
@@ -59,53 +93,70 @@
         new Notification("ChatGPT Button Changed", { body });
         DBG("Notification shown:", body);
       } catch (e) {
-        // Some environments disallow direct constructor; fall back to console.
         DBG_ERR("Notification() failed, logging instead:", e);
         console.log("[ChatGPT Notifier]", body);
       }
     } else {
-      // No permission—don’t spam alerts; just log.
       DBG("No notification permission. Would have shown:", body);
     }
   }
 
-  function scheduleNotify(el, label, kind) {
+  function shouldNotify(kind, label) {
+    const state = getKindState(kind);
+    const now = Date.now();
+    if (label && label !== state.lastNotifiedLabel) return true;
+    if (now - state.lastNotifiedAt > RESURGE_MS) return true; // allow repeat
+    return false;
+  }
+
+  function markNotified(kind, label) {
+    const state = getKindState(kind);
+    state.lastNotifiedLabel = label;
+    state.lastNotifiedAt = Date.now();
+  }
+
+  function scheduleNotify(el, label, kind, reason = "mutation") {
     const rec = observed.get(el);
     if (!rec) return;
 
-    // Deduplicate across multiple instances of the same "kind"
-    if (label) {
-      const last = lastNotifiedByKind.get(kind);
-      if (last === label) {
-        DBG("Deduped (same label) for kind:", kind, "label:", label);
-      } else {
-        lastNotifiedByKind.set(kind, label);
-      }
+    if (!shouldNotify(kind, label)) {
+      DBG("Deduped notify (reason:", reason + ")", "kind:", kind, "label:", label);
+      return;
     }
 
+    markNotified(kind, label);
     clearTimeout(rec.timer);
-    rec.timer = setTimeout(() => notifyWithLabel(label), 150);
+    rec.timer = setTimeout(() => notifyWithLabel(label), 120);
+    DBG("Scheduled notify (reason:", reason + ")", "kind:", kind, "label:", label);
   }
 
-  function maybeInitialNotify(btn, kind) {
-    // Fire once on attach if this "kind" has not been notified yet
-    // OR if the current label differs from the last notified for that kind.
+  function maybeInitialNotify(btn, kind, { reappeared } = { reappeared: false }) {
     const label = btn.getAttribute("aria-label") || "";
-    const last = lastNotifiedByKind.get(kind);
-    if (label && label !== last) {
-      DBG("Initial notify on attach. kind:", kind, "label:", label);
-      // Update before scheduling to avoid duplicate notifications from rapid rescans
-      lastNotifiedByKind.set(kind, label);
+    if (reappeared) {
+      DBG("Initial notify due to reappearance. kind:", kind, "label:", label);
+      // bypass dedupe on reappearance but still mark
+      markNotified(kind, label);
       const rec = observed.get(btn);
       if (rec) {
         clearTimeout(rec.timer);
-        rec.timer = setTimeout(() => notifyWithLabel(label), 50);
+        rec.timer = setTimeout(() => notifyWithLabel(label), 60);
       } else {
-        // Shouldn't happen, but just in case:
+        notifyWithLabel(label);
+      }
+      return;
+    }
+    if (shouldNotify(kind, label)) {
+      DBG("Initial notify (label/state change). kind:", kind, "label:", label);
+      markNotified(kind, label);
+      const rec = observed.get(btn);
+      if (rec) {
+        clearTimeout(rec.timer);
+        rec.timer = setTimeout(() => notifyWithLabel(label), 60);
+      } else {
         notifyWithLabel(label);
       }
     } else {
-      DBG("Skip initial notify (same as last or empty). kind:", kind, "label:", label);
+      DBG("Skip initial notify (dedup). kind:", kind, "label:", label);
     }
   }
 
@@ -113,12 +164,25 @@
     if (!btn || observed.has(btn)) return;
 
     const kind = btnKind(btn);
-    const rec = { observer: null, timer: null, kind };
+    const state = getKindState(kind);
+    state.present += 1;
+    const reappeared = state.present === 1; // transitioned 0 -> 1
+    if (reappeared) DBG("Kind reappeared:", kind);
+
+    const rec = { observer: null, io: null, timer: null, kind, wasVisible: null };
     observed.set(btn, rec);
 
     const currentLabel = btn.getAttribute("aria-label") || "";
-    DBG("Observing button:", { kind, label: currentLabel, node: btn });
+    rec.wasVisible = isElementVisible(btn);
+    DBG("Observing button:", {
+      kind,
+      label: currentLabel,
+      node: btn,
+      visible: rec.wasVisible,
+      presentCount: state.present,
+    });
 
+    // Observe attribute/child changes on the button
     rec.observer = new MutationObserver((mutations) => {
       let relevant = false;
       for (const m of mutations) {
@@ -135,10 +199,16 @@
       if (!relevant) return;
 
       const label = btn.getAttribute("aria-label") || "";
-      DBG("Mutation detected. kind:", kind, "new label:", label, "mutations:", mutations);
-      // Notify on any relevant change (even if label stays same for this node),
-      // but dedupe per-kind via lastNotifiedByKind.
-      scheduleNotify(btn, label, kind);
+      DBG(
+        "Mutation detected.",
+        "kind:",
+        kind,
+        "new label:",
+        label,
+        "mutations:",
+        mutations
+      );
+      scheduleNotify(btn, label, kind, "mutation");
     });
 
     rec.observer.observe(btn, {
@@ -148,22 +218,60 @@
       subtree: true,
     });
 
-    // NEW: Fire an "initial" notification on attach so we also capture states
-    // that appear by (re)creation rather than attribute mutation (e.g. speech button).
-    maybeInitialNotify(btn, kind);
+    // Visibility-based trigger (covers cases where node stays but becomes visible again)
+    if ("IntersectionObserver" in window) {
+      rec.io = new IntersectionObserver(
+        (entries) => {
+          const e = entries[0];
+          if (!e) return;
+          const nowVis = e.isIntersecting;
+          if (nowVis && !rec.wasVisible) {
+            const label = btn.getAttribute("aria-label") || "";
+            DBG("Visibility on -> notify. kind:", kind, "label:", label);
+            scheduleNotify(btn, label, kind, "visible");
+          }
+          rec.wasVisible = nowVis;
+        },
+        { threshold: 0.01 }
+      );
+      try {
+        rec.io.observe(btn);
+      } catch (e) {
+        DBG_ERR("IntersectionObserver.observe failed:", e);
+      }
+    } else {
+      // Fallback: check visibility opportunistically on rescans
+      rec.wasVisible = isElementVisible(btn);
+    }
+
+    // Fire an initial notification (handles attach/recreation)
+    maybeInitialNotify(btn, kind, { reappeared });
   }
 
   function cleanupDisconnected() {
     for (const [el, rec] of Array.from(observed.entries())) {
       if (!el.isConnected) {
+        const kind = rec.kind;
         try {
           rec.observer && rec.observer.disconnect();
         } catch (e) {
           DBG_ERR("observer.disconnect error:", e);
         }
+        try {
+          rec.io && rec.io.disconnect();
+        } catch (e) {
+          DBG_ERR("io.disconnect error:", e);
+        }
         clearTimeout(rec.timer);
         observed.delete(el);
-        DBG("Cleaned up disconnected button. kind:", rec.kind);
+
+        const state = getKindState(kind);
+        state.present = Math.max(0, state.present - 1);
+        if (state.present === 0) {
+          state.lastMissingAt = Date.now();
+          DBG("Kind now absent:", kind);
+        }
+        DBG("Cleaned up disconnected button. kind:", kind, "present:", state.present);
       }
     }
   }
@@ -183,6 +291,18 @@
     const matches = xAll(XPATH);
     DBG(`Scan (${why}) found ${matches.length} match(es).`);
     for (const btn of matches) observeButton(btn);
+
+    // Fallback visibility edge: if a tracked button is visible again without IO,
+    // trigger a notify (rare path — older browsers / IO disabled).
+    for (const [el, rec] of observed.entries()) {
+      const nowVis = isElementVisible(el);
+      if (nowVis && rec.wasVisible === false) {
+        const label = el.getAttribute("aria-label") || "";
+        DBG("Fallback vis-on -> notify. kind:", rec.kind, "label:", label);
+        scheduleNotify(el, label, rec.kind, "visible-fallback");
+      }
+      rec.wasVisible = nowVis;
+    }
   }
 
   function start() {
@@ -193,8 +313,6 @@
 
     // Watch the whole document for dynamic UI changes (button recreate, etc.)
     const docObserver = new MutationObserver((mutationList) => {
-      // Cheap heuristic: only rescan when nodes are added/removed near our target area,
-      // but since chat UI is highly dynamic, we just rescan on any childList change.
       for (const m of mutationList) {
         if (m.type === "childList") {
           scheduleRescan("doc-childList");
