@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "ChatGPT Button Change Notifier",
+  "version": "0.1.0",
+  "description": "Shows a desktop notification whenever the ChatGPT composer button changes. The notification body is the button’s aria-label.",
+  "host_permissions": ["https://chatgpt.com/c/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/c/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
